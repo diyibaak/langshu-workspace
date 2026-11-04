@@ -941,8 +941,10 @@ async function ghWrite(doc, sha) {
     headers: Object.assign({ "Content-Type": "application/json" }, ghHeaders()),
     body: JSON.stringify(body)
   });
+  if (r.status === 404) throw new Error("仓库不存在，或 Token 没有该仓库权限");
   const j = await r.json();
-  return j && j.content ? j.content.sha : null;
+  if (!j || !j.content) throw new Error(j && j.message ? j.message : "写入未确认");
+  return j.content.sha;
 }
 
 const tstamp = t => (t && t.updatedAt) || 0;
