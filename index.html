@@ -737,7 +737,10 @@
       <label>多端同步 · GitHub 私有仓库</label>
       <div class="sync-box">
         <input class="ip" id="syncRepo" placeholder="仓库，如 diyibaak/langshu-data">
-        <input class="ip" type="password" id="syncToken" placeholder="GitHub Token（仅授权该私有仓库）" autocomplete="off">
+        <div style="display:flex;gap:8px">
+          <input class="ip" type="password" id="syncToken" placeholder="GitHub Token（ghp_ 开头，完整粘贴）" autocomplete="new-password" spellcheck="false" style="flex:1">
+          <button class="btn sm" onclick="tglTok()" title="显示 / 隐藏" style="flex:none">👁</button>
+        </div>
         <div class="sync-actions">
           <button class="btn sm primary" onclick="saveSyncCfg()">保存并同步</button>
           <button class="btn sm" onclick="syncNow(true)">立即同步</button>
@@ -1004,18 +1007,44 @@ function renderSyncUI() {
   $("syncRepo").value = syncCfg.repo || "";
   $("syncToken").value = syncCfg.token || "";
   if (!syncCfg.token) setSync("", "未开启同步，数据只在本浏览器", "未开启同步");
-  else if (syncCfg.last) setSync("ok", "已开启 · 上次同步 " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条", "已同步");
+  else if (syncCfg.last) setSync("ok", "已开启 · 上次同步 " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条 · Token " + fpTok(syncCfg.token), "已同步");
   else setSync("", "已填写配置，点「立即同步」", "待同步");
 }
-function saveSyncCfg() {
+const fpTok = t => t ? t.slice(0, 4) + "…" + t.slice(-4) : "";
+function tglTok() { const f = $("syncToken"); f.type = f.type === "password" ? "text" : "password"; }
+async function saveSyncCfg() {
   const repo = $("syncRepo").value.trim();
-  const token = $("syncToken").value.trim();
+  // 清洗：去掉空格、换行、零宽字符（复制常见的坑）
+  const token = $("syncToken").value.replace(/[\s\u200b-\u200d\ufeff]/g, "");
+  $("syncToken").value = token;
   if (!/^[\w.\-]+\/[\w.\-]+$/.test(repo)) { toast("仓库格式应为 用户名/仓库名"); return; }
   if (!token) { toast("请填写 GitHub Token"); return; }
-  syncCfg.repo = repo; syncCfg.token = token; syncCfg.branch = "main";
-  wj(K_SYNC_CFG, syncCfg);
-  toast("配置已保存，开始同步");
-  syncNow(true);
+  if (!/^(ghp_|github_pat_|gho_|ghu_|ghs_)/.test(token)) { toast("Token 应以 ghp_ 或 github_pat_ 开头，请检查是否复制完整"); return; }
+  setSync("busy", "正在验证 Token…", "验证中…");
+  try {
+    const r = await fetch("https://api.github.com/user", { headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" }, cache: "no-store" });
+    if (r.status === 401) {
+      setSync("err", "Token 无效或已过期（GitHub 返回 401）。请重新完整复制", "Token 无效");
+      toast("Token 无效：请确认复制的是 ghp_ 开头的一整串");
+      return;
+    }
+    if (!r.ok) { setSync("err", "验证失败（HTTP " + r.status + "）", "验证失败"); return; }
+    const me = await r.json();
+    const r2 = await fetch("https://api.github.com/repos/" + repo, { headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" }, cache: "no-store" });
+    if (!r2.ok) {
+      setSync("err", "Token 属于 " + me.login + "，但无权访问仓库 " + repo, "无仓库权限");
+      toast("Token 有效，但没有 " + repo + " 的权限");
+      return;
+    }
+    syncCfg.repo = repo; syncCfg.token = token; syncCfg.branch = "main";
+    wj(K_SYNC_CFG, syncCfg);
+    setSync("ok", "Token 验证通过（" + me.login + " · " + fpTok(token) + "），开始同步…", "验证通过");
+    toast("Token 验证通过：" + me.login);
+    syncNow(true);
+  } catch (e) {
+    setSync("err", "网络错误：" + e.message, "网络错误");
+    toast("网络错误：" + e.message);
+  }
 }
 function syncOff() {
   if (!confirm("断开同步？本机数据保留，但之后不再上传和拉取。")) return;
