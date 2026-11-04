@@ -501,6 +501,31 @@
     .login-chips { display: none; }
   }
 
+  /* ============ 云同步 ============ */
+  .sync-box {
+    border: 1px solid var(--hair); border-radius: var(--r-md);
+    padding: 12px; background: var(--surface-2);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sync-box .ip { height: 34px; font-size: 12.5px; }
+  .sync-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+  .sync-status {
+    font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px;
+    padding-top: 2px; line-height: 1.6;
+  }
+  .sync-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #C8D2CD; flex: none;
+  }
+  .sync-dot.ok { background: #14B981; box-shadow: 0 0 0 3px rgba(20,185,129,.14); }
+  .sync-dot.err { background: #D9534F; box-shadow: 0 0 0 3px rgba(217,83,79,.14); }
+  .sync-dot.busy { background: #D0912F; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .sync-help {
+    font-size: 10.5px; color: #A9B4AF; line-height: 1.65;
+    border-top: 1px dashed var(--hair); padding-top: 8px;
+  }
+  .sync-help b { color: #6E7C76; font-weight: 600; }
+
   /* ============ 提示 ============ */
   .toast {
     position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 8px);
@@ -693,8 +718,26 @@
         <button class="btn sm" style="color:var(--red)" onclick="clearAll()">清空全部</button>
       </div>
     </div>
+    <div style="height:1px;background:var(--hair);margin:18px 0"></div>
+    <div class="fld">
+      <label>多端同步 · GitHub 私有仓库</label>
+      <div class="sync-box">
+        <input class="ip" id="syncRepo" placeholder="仓库，如 diyibaak/langshu-data">
+        <input class="ip" type="password" id="syncToken" placeholder="GitHub Token（仅授权该私有仓库）" autocomplete="off">
+        <div class="sync-actions">
+          <button class="btn sm primary" onclick="saveSyncCfg()">保存并同步</button>
+          <button class="btn sm" onclick="syncNow(false)">立即同步</button>
+          <button class="btn sm" style="color:var(--red)" onclick="syncOff()">断开</button>
+        </div>
+        <div class="sync-status"><span class="sync-dot" id="syncDot"></span><span id="syncText">未开启同步</span></div>
+        <div class="sync-help">
+          Token 只存在本浏览器，不会上传。<b>建议用 Fine-grained token</b>，仅授权 <b>langshu-data</b> 这一个仓库的 <b>Contents: Read and write</b>。<br>
+          开启后每次改动自动上传；打开页面、切回窗口时自动拉取最新，按任务最后修改时间合并。
+        </div>
+      </div>
+    </div>
     <div style="font-size:11px;color:#A9B4AF;line-height:1.7;margin-top:4px">
-      前端静态站点，账号仅作访问门禁，非真实安全认证。数据保存在本浏览器。
+      前端静态站点，账号仅作访问门禁，非真实安全认证。任务数据先存本浏览器，开启同步后再上云。
     </div>
   </div>
 </div>
@@ -843,7 +886,169 @@ function toast(m) {
   const t = $("toast"); t.textContent = m; t.classList.add("on");
   clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("on"), 1800);
 }
-const saveTasks = () => wj(K_TASKS, tasks);
+/* ============ 云同步（GitHub 私有仓库） ============ */
+const K_DEL = "ls_hub_del_v1";
+const K_SYNC_CFG = "ls_hub_sync_v1";
+const GH_API = "https://api.github.com";
+let syncCfg = rj(K_SYNC_CFG, { token: "", repo: "diyibaak/langshu-data", branch: "main", last: 0 });
+let delMap = rj(K_DEL, {});
+let applyingRemote = false;
+let pushTimer = null;
+let syncing = false;
+
+function b64dec(s) {
+  const bin = atob((s || "").replace(/\s/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function b64enc(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+const ghHeaders = () => ({ Authorization: "Bearer " + syncCfg.token, Accept: "application/vnd.github+json" });
+
+async function ghFetch(url, opt) {
+  const r = await fetch(url, opt);
+  if (r.ok || r.status === 404) return r;
+  let msg = "HTTP " + r.status;
+  try { const j = await r.json(); if (j && j.message) msg = j.message; } catch (e) {}
+  if (r.status === 401) msg = "Token 无效或已过期";
+  else if (r.status === 403) msg = "Token 权限不足（需 Contents 读写）";
+  else if (r.status === 422) msg = "写入冲突，请重试";
+  throw new Error(msg);
+}
+async function ghRead() {
+  const url = `${GH_API}/repos/${syncCfg.repo}/contents/data.json?ref=${encodeURIComponent(syncCfg.branch)}&t=${Date.now()}`;
+  const r = await ghFetch(url, { headers: ghHeaders(), cache: "no-store" });
+  if (r.status === 404) return { doc: null, sha: null };
+  const j = await r.json();
+  let doc = null;
+  try { doc = JSON.parse(b64dec(j.content)); } catch (e) { doc = null; }
+  return { doc, sha: j.sha };
+}
+async function ghWrite(doc, sha) {
+  const body = {
+    message: "sync: " + new Date().toISOString().slice(0, 16).replace("T", " "),
+    content: b64enc(JSON.stringify(doc, null, 2)),
+    branch: syncCfg.branch
+  };
+  if (sha) body.sha = sha;
+  const r = await ghFetch(`${GH_API}/repos/${syncCfg.repo}/contents/data.json`, {
+    method: "PUT",
+    headers: Object.assign({ "Content-Type": "application/json" }, ghHeaders()),
+    body: JSON.stringify(body)
+  });
+  const j = await r.json();
+  return j && j.content ? j.content.sha : null;
+}
+
+const tstamp = t => (t && t.updatedAt) || 0;
+function mergeDocs(remote) {
+  const rTasks = (remote && Array.isArray(remote.tasks)) ? remote.tasks : [];
+  const rDel = (remote && remote.del) || {};
+  const merged = Object.assign({}, delMap);
+  Object.keys(rDel).forEach(k => { merged[k] = Math.max(merged[k] || 0, rDel[k] || 0); });
+  const map = new Map();
+  [...tasks, ...rTasks].forEach(t => {
+    if (!t || !t.id) return;
+    const cur = map.get(t.id);
+    if (!cur || tstamp(t) > tstamp(cur)) map.set(t.id, t);
+  });
+  const out = [...map.values()].filter(t => (merged[t.id] || 0) <= tstamp(t));
+  const cutoff = Date.now() - 60 * 864e5;
+  Object.keys(merged).forEach(k => { if (merged[k] < cutoff) delete merged[k]; });
+  delMap = merged;
+  return out;
+}
+
+function timeAgo(ts) {
+  const d = Date.now() - ts;
+  if (d < 6e4) return "刚刚";
+  if (d < 36e5) return Math.floor(d / 6e4) + " 分钟前";
+  if (d < 864e5) return Math.floor(d / 36e5) + " 小时前";
+  return Math.floor(d / 864e5) + " 天前";
+}
+function setSync(kind, text) {
+  const dot = $("syncDot"), tx = $("syncText");
+  if (!dot || !tx) return;
+  dot.className = "sync-dot" + (kind === "ok" ? " ok" : kind === "err" ? " err" : kind === "busy" ? " busy" : "");
+  tx.textContent = text;
+}
+function renderSyncUI() {
+  if (!$("syncRepo")) return;
+  $("syncRepo").value = syncCfg.repo || "";
+  $("syncToken").value = syncCfg.token || "";
+  if (!syncCfg.token) setSync("", "未开启同步，数据只在本浏览器");
+  else if (syncCfg.last) setSync("ok", "已开启 · 上次同步 " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条");
+  else setSync("", "已填写配置，点「立即同步」");
+}
+function saveSyncCfg() {
+  const repo = $("syncRepo").value.trim();
+  const token = $("syncToken").value.trim();
+  if (!/^[\w.\-]+\/[\w.\-]+$/.test(repo)) { toast("仓库格式应为 用户名/仓库名"); return; }
+  if (!token) { toast("请填写 GitHub Token"); return; }
+  syncCfg.repo = repo; syncCfg.token = token; syncCfg.branch = "main";
+  wj(K_SYNC_CFG, syncCfg);
+  toast("配置已保存，开始同步");
+  syncNow(true);
+}
+function syncOff() {
+  if (!confirm("断开同步？本机数据保留，但之后不再上传和拉取。")) return;
+  syncCfg.token = "";
+  wj(K_SYNC_CFG, syncCfg);
+  renderSyncUI();
+  toast("已断开同步");
+}
+
+async function syncNow(manual) {
+  if (!syncCfg.token) { if (manual === true) toast("请先填写 Token 并保存"); return false; }
+  if (syncing) return false;
+  syncing = true;
+  setSync("busy", "同步中…");
+  try {
+    const { doc, sha } = await ghRead();
+    const before = JSON.stringify(tasks);
+    applyingRemote = true;
+    tasks = mergeDocs(doc);
+    const changed = JSON.stringify(tasks) !== before;
+    wj(K_TASKS, tasks);
+    wj(K_DEL, delMap);
+    applyingRemote = false;
+    const payload = { version: 1, savedAt: Date.now(), tasks, del: delMap };
+    try {
+      await ghWrite(payload, sha);
+    } catch (e1) {
+      const again = await ghRead();
+      await ghWrite(payload, again.sha);
+    }
+    syncCfg.last = Date.now();
+    wj(K_SYNC_CFG, syncCfg);
+    syncing = false;
+    setSync("ok", "已同步 · " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条");
+    if (changed) renderAll();
+    if (manual === true) toast("同步完成，共 " + tasks.length + " 条任务");
+    return true;
+  } catch (e) {
+    syncing = false;
+    applyingRemote = false;
+    setSync("err", "同步失败：" + e.message);
+    if (manual === true) toast("同步失败：" + e.message);
+    return false;
+  }
+}
+
+function touch(t) { if (t) t.updatedAt = Date.now(); }
+const saveTasks = () => {
+  wj(K_TASKS, tasks);
+  wj(K_DEL, delMap);
+  if (!applyingRemote && syncCfg.token) {
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => syncNow(false), 1600);
+  }
+};
 const matchesRegion = (t, r) => {
   const pf = t.platforms || [];
   if (!pf.length) return true;
@@ -1142,7 +1347,7 @@ function onDrop(e, col) {
   if (t && t.col !== col) {
     t.col = col;
     if (col === "published" && !t.publishedAt) t.publishedAt = today();
-    saveTasks(); renderAll();
+    touch(t); saveTasks(); renderAll();
     toast("已移至「" + COLS.find(c => c.id === col).name + "」");
   }
 }
@@ -1151,10 +1356,11 @@ function move(id, dir) {
   const i = COLS.findIndex(c => c.id === t.col);
   t.col = COLS[Math.min(Math.max(i + dir, 0), COLS.length - 1)].id;
   if (t.col === "published" && !t.publishedAt) t.publishedAt = today();
-  saveTasks(); renderAll();
+  touch(t); saveTasks(); renderAll();
 }
 function del(id) {
   if (!confirm("确定删除这个任务？")) return;
+  delMap[id] = Date.now();
   tasks = tasks.filter(t => t.id !== id);
   saveTasks(); renderAll(); toast("已删除");
 }
@@ -1237,9 +1443,9 @@ function saveTask() {
       link: $("fLink").value.trim()
     };
   }
-  if (editingId) { Object.assign(tasks.find(t => t.id === editingId), data); toast("已保存"); }
+  if (editingId) { const t = tasks.find(t => t.id === editingId); Object.assign(t, data); touch(t); toast("已保存"); }
   else {
-    tasks.push({ id: "t" + Date.now() + Math.random().toString(36).slice(2, 6), col: $("mask").dataset.col || "backlog", createdAt: today(), ...data });
+    tasks.push({ id: "t" + Date.now() + Math.random().toString(36).slice(2, 6), col: $("mask").dataset.col || "backlog", createdAt: today(), updatedAt: Date.now(), ...data });
     toast("已创建");
   }
   saveTasks(); closeModal(); renderAll();
@@ -1252,6 +1458,7 @@ function openSettings() {
   $("setName").textContent = session.name;
   $("setMeta").textContent = session.user + " · " + (session.role === "owner" ? "管理员" : "访客");
   $("dataCount").textContent = tasks.length;
+  renderSyncUI();
   $("setMask").classList.add("on");
 }
 function closeSettings() { $("setMask").classList.remove("on"); }
@@ -1277,7 +1484,9 @@ function changePass() {
   toast("密码已更新");
 }
 function clearAll() {
-  if (!confirm("将删除全部任务，不可恢复。确定？")) return;
+  if (!confirm("将删除全部任务，不可恢复（已开启同步的话，云端也会一起删）。确定？")) return;
+  const now = Date.now();
+  tasks.forEach(t => { delMap[t.id] = now; });
   tasks = []; saveTasks(); renderAll(); $("dataCount").textContent = "0"; toast("已清空");
 }
 
@@ -1299,7 +1508,10 @@ function importData(input) {
       const data = JSON.parse(rd.result);
       if (!Array.isArray(data)) throw 0;
       if (confirm(`导入 ${data.length} 条任务，将覆盖当前数据，继续？`)) {
-        tasks = data; saveTasks(); renderAll(); toast("导入成功");
+        const now = Date.now();
+        tasks.forEach(t => { delMap[t.id] = now; });
+        tasks = data.filter(t => t && t.id).map(t => Object.assign({}, t, { updatedAt: now }));
+        saveTasks(); renderAll(); toast("导入成功");
       }
     } catch (e) { toast("文件格式错误"); }
   };
@@ -1309,6 +1521,8 @@ function importData(input) {
 
 /* ============ 启动 ============ */
 function seedDemo() {
+  // 已开启同步时不再塞示例数据，避免新设备把删掉的示例任务「复活」
+  if (syncCfg.token) return;
   if (tasks.length || localStorage.getItem(K_TASKS + "_seeded")) return;
   tasks = [
     { id: "d1", col: "plan", type: "content", title: "《重生之都市修仙》高能钩子切片", note: "前 3 秒反转，完播卡点设计，抖音违禁词自查", platforms: ["douyin", "drama"], prio: "P0", owner: "狼叔", due: addDays(today(), 2), link: "", createdAt: today() },
@@ -1317,6 +1531,8 @@ function seedDemo() {
     { id: "d4", col: "published", type: "content", title: "YouTube Shorts 英文字幕版", note: "挂落地页链接，监控 CTR 与完播", platforms: ["yt", "ig"], prio: "P1", owner: "狼叔", due: "", link: "", createdAt: today() },
     { id: "d5", col: "backlog", type: "workflow", title: "品牌宣传短视频代制作", client: "示例客户 · XX传媒", material: "品牌 Logo、产品图 3 张、slogan 文案、授权书", requirement: "竖版 9:16、30s 内、突出核心卖点、含中英字幕、3 天出初稿", prio: "P1", owner: "狼叔", due: addDays(today(), 7), link: "", platforms: [], createdAt: today() }
   ];
+  const now = Date.now();
+  tasks.forEach(t => { t.updatedAt = now; });
   localStorage.setItem(K_TASKS + "_seeded", "1");
   saveTasks();
 }
@@ -1326,7 +1542,14 @@ function boot() {
   if (!Array.isArray(tasks)) tasks = [];
   seedDemo();
   renderAll();
+  if (syncCfg.token) syncNow(false);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !syncCfg.token || !session || syncing) return;
+  if (Date.now() - (syncCfg.last || 0) < 30000) return;
+  syncNow(false);
+});
 
 (function init() {
   accounts();
