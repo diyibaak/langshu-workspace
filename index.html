@@ -1636,7 +1636,24 @@ document.addEventListener("visibilitychange", () => {
   syncNow(false);
 });
 
+/* 通过链接自动配置同步：https://xxx/#sync=<token>&repo=<owner/repo> */
+function applyHashCfg() {
+  const h = location.hash.replace(/^#/, "");
+  if (!h || h.indexOf("sync=") < 0) return;
+  let p;
+  try { p = new URLSearchParams(h); } catch (e) { return; }
+  const t = (p.get("sync") || "").replace(/[\s\u200b-\u200d\ufeff]/g, "");
+  if (!t) return;
+  syncCfg.token = t;
+  syncCfg.repo = p.get("repo") || syncCfg.repo;
+  syncCfg.branch = "main";
+  wj(K_SYNC_CFG, syncCfg);
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  setTimeout(() => toast("已自动配置同步"), 700);
+}
+
 (function init() {
+  applyHashCfg();
   accounts();
   if (checkSession()) boot();
   else { document.body.classList.add("login"); renderLogin(); }
