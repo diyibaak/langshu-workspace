@@ -502,6 +502,15 @@
   }
 
   /* ============ 云同步 ============ */
+  .sync-chip {
+    height: 30px; padding: 0 10px; border-radius: 99px;
+    border: 1px solid var(--hair); background: #fff; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--muted); white-space: nowrap;
+    transition: border-color .15s, color .15s;
+  }
+  .sync-chip:hover { border-color: #D3DDD8; color: var(--ink-2); }
+  .sync-chip .sync-dot { width: 6px; height: 6px; }
   .sync-box {
     border: 1px solid var(--hair); border-radius: var(--r-md);
     padding: 12px; background: var(--surface-2);
@@ -550,6 +559,8 @@
     .tab { padding: 0 10px; font-size: 12px; }
     .tab .n { display: none; }
     .top-right .btn-text { display: none; }
+    .sync-chip { padding: 0 9px; }
+    .sync-chip #chipText { display: none; }
     .wrap { padding: 16px 14px 44px; }
     .page-title { font-size: 22px; }
     .grid2 { grid-template-columns: 1fr; }
@@ -573,6 +584,9 @@
     </div>
     <nav class="tabs" id="tabs"></nav>
     <div class="top-right">
+      <button class="sync-chip" id="syncChip" onclick="openSettings()" title="多端同步状态，点击查看">
+        <span class="sync-dot" id="chipDot"></span><span id="chipText">未开启同步</span>
+      </button>
       <button class="btn sm" onclick="openSettings()" title="账号与数据">
         <span class="btn-text">设置</span>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="opacity:.7"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.6M8 12.9v1.6M14.5 8h-1.6M3.1 8H1.5M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1M12.6 12.6l-1.1-1.1M4.5 4.5L3.4 3.4"/></svg>
@@ -726,7 +740,8 @@
         <input class="ip" type="password" id="syncToken" placeholder="GitHub Token（仅授权该私有仓库）" autocomplete="off">
         <div class="sync-actions">
           <button class="btn sm primary" onclick="saveSyncCfg()">保存并同步</button>
-          <button class="btn sm" onclick="syncNow(false)">立即同步</button>
+          <button class="btn sm" onclick="syncNow(true)">立即同步</button>
+          <button class="btn sm" onclick="syncPullOnly(true)">从云端拉取</button>
           <button class="btn sm" style="color:var(--red)" onclick="syncOff()">断开</button>
         </div>
         <div class="sync-status"><span class="sync-dot" id="syncDot"></span><span id="syncText">未开启同步</span></div>
@@ -895,6 +910,7 @@ let delMap = rj(K_DEL, {});
 let applyingRemote = false;
 let pushTimer = null;
 let syncing = false;
+let syncStartAt = 0;
 
 function b64dec(s) {
   const bin = atob((s || "").replace(/\s/g, ""));
@@ -973,19 +989,23 @@ function timeAgo(ts) {
   if (d < 864e5) return Math.floor(d / 36e5) + " 小时前";
   return Math.floor(d / 864e5) + " 天前";
 }
-function setSync(kind, text) {
+function setSync(kind, text, chipText) {
+  const cls = "sync-dot" + (kind === "ok" ? " ok" : kind === "err" ? " err" : kind === "busy" ? " busy" : "");
   const dot = $("syncDot"), tx = $("syncText");
-  if (!dot || !tx) return;
-  dot.className = "sync-dot" + (kind === "ok" ? " ok" : kind === "err" ? " err" : kind === "busy" ? " busy" : "");
-  tx.textContent = text;
+  if (dot) dot.className = cls;
+  if (tx) tx.textContent = text;
+  const cdot = $("chipDot"), ctx = $("chipText"), chip = $("syncChip");
+  if (cdot) cdot.className = cls;
+  if (ctx) ctx.textContent = chipText || "同步";
+  if (chip) chip.title = text + "（点击查看设置）";
 }
 function renderSyncUI() {
   if (!$("syncRepo")) return;
   $("syncRepo").value = syncCfg.repo || "";
   $("syncToken").value = syncCfg.token || "";
-  if (!syncCfg.token) setSync("", "未开启同步，数据只在本浏览器");
-  else if (syncCfg.last) setSync("ok", "已开启 · 上次同步 " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条");
-  else setSync("", "已填写配置，点「立即同步」");
+  if (!syncCfg.token) setSync("", "未开启同步，数据只在本浏览器", "未开启同步");
+  else if (syncCfg.last) setSync("ok", "已开启 · 上次同步 " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条", "已同步");
+  else setSync("", "已填写配置，点「立即同步」", "待同步");
 }
 function saveSyncCfg() {
   const repo = $("syncRepo").value.trim();
@@ -1007,9 +1027,12 @@ function syncOff() {
 
 async function syncNow(manual) {
   if (!syncCfg.token) { if (manual === true) toast("请先填写 Token 并保存"); return false; }
-  if (syncing) return false;
-  syncing = true;
-  setSync("busy", "同步中…");
+  if (syncing) {
+    if (Date.now() - syncStartAt < 30000) return false;
+    syncing = false; // 超时强制解锁，避免卡死
+  }
+  syncing = true; syncStartAt = Date.now();
+  setSync("busy", "同步中…", "同步中…");
   try {
     const { doc, sha } = await ghRead();
     const before = JSON.stringify(tasks);
@@ -1029,15 +1052,45 @@ async function syncNow(manual) {
     syncCfg.last = Date.now();
     wj(K_SYNC_CFG, syncCfg);
     syncing = false;
-    setSync("ok", "已同步 · " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条");
+    setSync("ok", "已同步 · " + timeAgo(syncCfg.last) + " · 共 " + tasks.length + " 条", "已同步");
     if (changed) renderAll();
     if (manual === true) toast("同步完成，共 " + tasks.length + " 条任务");
     return true;
   } catch (e) {
     syncing = false;
     applyingRemote = false;
-    setSync("err", "同步失败：" + e.message);
+    setSync("err", "同步失败：" + e.message, "同步失败");
     if (manual === true) toast("同步失败：" + e.message);
+    return false;
+  }
+}
+
+/* 只从云端拉取，不覆盖云端（新设备首次接入用这个） */
+async function syncPullOnly(manual) {
+  if (!syncCfg.token) { toast("请先填写 Token 并保存"); return false; }
+  setSync("busy", "拉取中…", "同步中…");
+  try {
+    const { doc } = await ghRead();
+    if (!doc || !Array.isArray(doc.tasks)) {
+      setSync("ok", "云端还没有数据，先在本机新建任务即可上传", "云端为空");
+      if (manual === true) toast("云端暂无数据");
+      return false;
+    }
+    applyingRemote = true;
+    tasks = mergeDocs(doc);
+    applyingRemote = false;
+    wj(K_TASKS, tasks);
+    wj(K_DEL, delMap);
+    syncCfg.last = Date.now();
+    wj(K_SYNC_CFG, syncCfg);
+    renderAll();
+    setSync("ok", "已从云端拉取 · 共 " + tasks.length + " 条", "已同步");
+    if (manual === true) toast("已拉取 " + tasks.length + " 条任务");
+    return true;
+  } catch (e) {
+    applyingRemote = false;
+    setSync("err", "拉取失败：" + e.message, "同步失败");
+    if (manual === true) toast("拉取失败：" + e.message);
     return false;
   }
 }
@@ -1544,6 +1597,7 @@ function boot() {
   if (!Array.isArray(tasks)) tasks = [];
   seedDemo();
   renderAll();
+  renderSyncUI();
   if (syncCfg.token) syncNow(false);
 }
 
