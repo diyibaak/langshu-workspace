@@ -535,6 +535,40 @@
   }
   .sync-help b { color: #6E7C76; font-weight: 600; }
 
+  /* ============ 分集排期 ============ */
+  .eps-bar { display: flex; gap: 7px; margin-bottom: 9px; align-items: center; }
+  .eps-bar .ip { flex: 0 0 76px; height: 32px; text-align: center; }
+  .eps-row { display: grid; grid-template-columns: 42px 1fr 126px 94px 24px; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .eps-row .ip { height: 32px; font-size: 12px; padding: 0 8px; }
+  .eps-no {
+    font-size: 12px; font-weight: 600; color: var(--ink-2); text-align: center;
+    background: var(--surface-2); border: 1px solid var(--hair); border-radius: 7px; padding: 7px 0;
+  }
+  .eps-x { border: 0; background: none; cursor: pointer; color: #C2CCC7; font-size: 14px; line-height: 1; padding: 4px; }
+  .eps-x:hover { color: var(--red); }
+  .eps-empty { font-size: 11.5px; color: #B6C1BC; padding: 4px 2px 2px; }
+  .ep-prog {
+    display: flex; align-items: center; gap: 7px; margin-bottom: 2px;
+  }
+  .ep-prog-bar { flex: 1; height: 4px; border-radius: 3px; background: #ECF0EE; overflow: hidden; }
+  .ep-prog-bar i { display: block; height: 100%; background: #14B981; border-radius: 3px; transition: width .3s; }
+  .ep-prog-txt { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .ep-next {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 11.5px; color: var(--ink-2);
+    background: var(--surface-2); border: 1px solid var(--hair); border-radius: 7px;
+    padding: 5px 8px; margin: 4px 0 2px;
+  }
+  .ep-next .d { color: var(--muted); }
+  .ep-next .d.over { color: var(--red); font-weight: 600; }
+  .ep-next .d.soon { color: #D0912F; font-weight: 600; }
+  .ep-done-btn {
+    border: 1px solid var(--hair); background: #fff; border-radius: 6px;
+    font-size: 10.5px; color: #0B8A5F; cursor: pointer; padding: 3px 7px; white-space: nowrap;
+    transition: all .15s;
+  }
+  .ep-done-btn:hover { background: #F0FAF5; border-color: #BFE5D4; }
+
   /* ============ 提示 ============ */
   .toast {
     position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 8px);
@@ -634,6 +668,15 @@
       <div class="fld">
         <label>平台分类（可多选）</label>
         <div id="chips"></div>
+      </div>
+      <div class="fld" id="epsWrap" style="display:none">
+        <label>分集排期 · 每集独立时间和状态</label>
+        <div class="eps-bar">
+          <input class="ip" id="fEpNum" type="number" min="1" max="999" placeholder="12" title="总集数">
+          <button class="btn sm" onclick="genEps()">生成集数</button>
+          <button class="btn sm" onclick="addEp()">＋ 添加一集</button>
+        </div>
+        <div id="epsList"></div>
       </div>
       <div class="grid2">
         <div class="fld">
@@ -803,6 +846,54 @@ let F = { type: "", platform: "", prio: "", owner: "", q: "" };
 let editingId = null;
 let curType = "content";
 let chipSel = [];
+let epDraft = [];
+const padEp = n => (n < 10 ? "0" : "") + n;
+
+/* ============ 分集排期 ============ */
+const epsVisible = () => curType === "content" && chipSel.includes("drama");
+function updEpsVis() {
+  const w = $("epsWrap"); if (!w) return;
+  w.style.display = epsVisible() ? "" : "none";
+  if (epsVisible()) renderEps();
+}
+function renderEps() {
+  const box = $("epsList"); if (!box) return;
+  if (!epDraft.length) { box.innerHTML = `<div class="eps-empty">填总集数点「生成」，之后每集可单独设备注、完成时间和状态</div>`; return; }
+  box.innerHTML = epDraft.map((e, i) => `
+    <div class="eps-row">
+      <div class="eps-no">${padEp(e.n)}</div>
+      <input class="ip" value="${esc(e.title || "")}" placeholder="本集备注（选填）" oninput="epDraft[${i}].title = this.value">
+      <input class="ip" type="date" value="${e.due || ""}" onchange="epDraft[${i}].due = this.value">
+      <select class="ip" onchange="epDraft[${i}].status = this.value" style="padding:0 8px">
+        <option value="todo" ${(e.status || "todo") === "todo" ? "selected" : ""}>待完成</option>
+        <option value="doing" ${e.status === "doing" ? "selected" : ""}>制作中</option>
+        <option value="done" ${e.status === "done" ? "selected" : ""}>已完成</option>
+      </select>
+      <button class="eps-x" onclick="delEp(${i})" title="删除本集">✕</button>
+    </div>`).join("");
+}
+function genEps() {
+  const n = parseInt($("fEpNum").value, 10);
+  if (!n || n < 1 || n > 999) { toast("请输入 1~999 的总集数"); return; }
+  const cur = epDraft.length;
+  if (n < cur) {
+    if (!confirm(`当前有 ${cur} 集，按 ${n} 集生成会删掉后面 ${cur - n} 集，确定？`)) return;
+    epDraft = epDraft.slice(0, n);
+  } else {
+    for (let i = cur; i < n; i++) epDraft.push({ n: i + 1, title: "", due: "", status: "todo" });
+  }
+  renderEps();
+}
+function addEp() { epDraft.push({ n: epDraft.length + 1, title: "", due: "", status: "todo" }); renderEps(); }
+function delEp(i) { epDraft.splice(i, 1); epDraft.forEach((e, idx) => e.n = idx + 1); renderEps(); }
+function markEpDone(id, n) {
+  const t = tasks.find(x => x.id === id); if (!t) return;
+  const e = (t.eps || []).find(x => x.n === n); if (!e) return;
+  e.status = "done";
+  touch(t); saveTasks(); renderAll();
+  const next = (t.eps || []).find(x => x.status !== "done");
+  toast(`第${padEp(n)}集已完成` + (next ? ` · 下一集：第${padEp(next.n)}集` : " · 全部完成 🎉"));
+}
 let session = null;
 
 const $ = id => document.getElementById(id);
@@ -1351,7 +1442,8 @@ function visibleTasks() {
     if (F.prio && t.prio !== F.prio) return false;
     if (F.owner && t.owner !== F.owner) return false;
     if (q) {
-      const hay = [t.title, t.client, t.material, t.requirement, t.note, t.owner].join(" ").toLowerCase();
+      const epsTxt = (t.eps || []).map(e => (e.title || "") + " 第" + padEp(e.n) + "集").join(" ");
+      const hay = [t.title, t.client, t.material, t.requirement, t.note, t.owner, epsTxt].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -1396,6 +1488,19 @@ function cardHTML(t) {
   } else if (t.note) {
     note = `<div class="card-note">${esc(t.note.length > 54 ? t.note.slice(0, 54) + "…" : t.note)}</div>`;
   }
+  let epsHtml = "";
+  if (!isWf && t.eps && t.eps.length) {
+    const done = t.eps.filter(e => e.status === "done").length;
+    const pct = Math.round(done / t.eps.length * 100);
+    const next = t.eps.find(e => e.status !== "done");
+    let nxt = "";
+    if (next) {
+      const ds = dueState(next.due);
+      const ttl = esc((next.title || "").slice(0, 16)) + ((next.title || "").length > 16 ? "…" : "");
+      nxt = `<div class="ep-next"><span>第${padEp(next.n)}集 ${ttl}</span><span class="d ${ds}">${next.due ? (ds === "over" ? "⚠ " : "⏰ ") + next.due.slice(5) : "未排期"}</span><button class="ep-done-btn" onclick="event.stopPropagation();markEpDone('${t.id}',${next.n})">完成 ✓</button></div>`;
+    }
+    epsHtml = `<div class="ep-prog"><div class="ep-prog-bar"><i style="width:${pct}%"></i></div><span class="ep-prog-txt">分集 ${done}/${t.eps.length}</span></div>${nxt}`;
+  }
   return `
     <article class="card" draggable="true" ondragstart="onDragStart(event,'${t.id}')" ondragend="onDragEnd(event)" onclick="openModal('${t.id}')">
       <div class="card-top">
@@ -1403,6 +1508,7 @@ function cardHTML(t) {
         <div class="card-title">${esc(t.title)}</div>
       </div>
       ${note}
+      ${epsHtml}
       <div class="chips-row">${chips.join("")}</div>
       <div class="card-foot">
         <span class="due ${ds}">${t.due ? (ds === "over" ? "⚠ " : "⏰ ") + t.due.slice(5) : ""}</span>
@@ -1467,6 +1573,7 @@ function renderChips() {
 function tgl(k, el) {
   if (chipSel.includes(k)) { chipSel = chipSel.filter(x => x !== k); el.classList.remove("on"); }
   else { chipSel.push(k); el.classList.add("on"); }
+  updEpsVis();
 }
 function openModal(id, col) {
   editingId = id || null;
@@ -1487,6 +1594,8 @@ function openModal(id, col) {
   $("fWfLink").value = t ? (t.link || "") : "";
   chipSel = t ? [...(t.platforms || [])] : [];
   renderChips();
+  epDraft = t ? (t.eps || []).map(e => Object.assign({}, e)) : [];
+  updEpsVis();
   $("mask").classList.add("on");
   $("mask").dataset.col = (!t && col) ? col : "";
   if (!t) setTimeout(() => $("fTitle").focus(), 80);
@@ -1524,7 +1633,8 @@ function saveTask() {
       prio: $("fPrio").value,
       owner: $("fOwner").value.trim() || "狼叔",
       due: $("fDue").value,
-      link: $("fLink").value.trim()
+      link: $("fLink").value.trim(),
+      eps: epDraft.map(e => Object.assign({}, e))
     };
   }
   if (editingId) { const t = tasks.find(t => t.id === editingId); Object.assign(t, data); touch(t); toast("已保存"); }
