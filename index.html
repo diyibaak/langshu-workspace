@@ -1199,7 +1199,9 @@ async function rmAtt(tid, i) {
       headers: Object.assign({ "Content-Type": "application/json" }, ghHeaders()),
       body: JSON.stringify({ message: "rm attach: " + a.name, sha: a.sha, branch: syncCfg.branch })
     });
-    t.attachments.splice(i, 1); touch(t); saveTasks(); renderAll(); renderAtts();
+    t.attachments.splice(i, 1); touch(t); saveTasks(); renderAll();
+    attExisting = (t.attachments || []).map(a => Object.assign({ tid: t.id }, a));
+    renderAtts();
     toast("附件已删除");
   } catch (e) { toast("删除失败：" + e.message); }
 }
