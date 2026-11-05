@@ -569,6 +569,33 @@
   }
   .ep-done-btn:hover { background: #F0FAF5; border-color: #BFE5D4; }
 
+  /* ============ 附件 ============ */
+  .att-drop {
+    border: 1.5px dashed #C7D4CE; border-radius: 10px; padding: 15px 10px;
+    text-align: center; font-size: 11.5px; color: var(--muted); cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .att-drop:hover { border-color: var(--brand); background: #F3FAF7; }
+  .att-drop.drag { border-color: var(--brand); background: #EAF6F0; }
+  .att-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .att-item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    background: #F7FAF8; border: 1px solid #E7EFEB; border-radius: 9px; font-size: 12px;
+  }
+  .att-item .ic { flex-shrink: 0; font-size: 14px; }
+  .att-item .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .att-item .sz { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+  .att-item .op { display: flex; gap: 2px; flex-shrink: 0; }
+  .att-item .op button {
+    border: 0; background: transparent; cursor: pointer; font-size: 12px;
+    padding: 3px 7px; border-radius: 6px; color: var(--muted); transition: background .12s;
+  }
+  .att-item .op button:hover { background: #E7EFEB; color: var(--text); }
+  .att-item .op button.dl { color: var(--brand); }
+  .att-item.pending { opacity: .65; }
+  .att-hint { font-size: 11px; color: #B0885A; margin-top: 5px; line-height: 1.6; }
+  .att-hint.err { color: var(--red); }
+
   /* ============ 提示 ============ */
   .toast {
     position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 8px);
@@ -731,6 +758,14 @@
         <label>相关链接（选填）</label>
         <input class="ip" id="fWfLink" placeholder="需求文档、交付网盘等">
       </div>
+    </div>
+
+    <div class="fld">
+      <label>附件（图片 / PSD / PDF / 文档，可多选，存到云端私有仓库）</label>
+      <div class="att-drop" id="attDrop">点击选择文件，或拖拽到此处 · 单个 ≤ 50MB</div>
+      <input type="file" id="attFile" multiple style="display:none">
+      <div class="att-list" id="attList"></div>
+      <div class="att-hint" id="attHint" style="display:none"></div>
     </div>
 
     <div class="modal-foot">
@@ -1058,6 +1093,116 @@ async function ghWrite(doc, sha) {
 }
 
 const tstamp = t => (t && t.updatedAt) || 0;
+
+/* ============ 附件：存私有仓库 files/<taskId>/ ============ */
+const ATT_MAX = 50 * 1024 * 1024;
+let attExisting = [];
+let attQueued = [];
+const escPath = p => p.split("/").map(encodeURIComponent).join("/");
+function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+function attIcon(name) {
+  const e = (name.split(".").pop() || "").toLowerCase();
+  if (["png","jpg","jpeg","webp","gif","bmp","svg","heic"].includes(e)) return "🖼";
+  if (e === "psd" || e === "ai" || e === "fig") return "🎨";
+  if (e === "pdf") return "📕";
+  if (["doc","docx","txt","md","rtf"].includes(e)) return "📄";
+  if (["xls","xlsx","csv"].includes(e)) return "📊";
+  if (["ppt","pptx","key"].includes(e)) return "📽";
+  if (["zip","rar","7z","tar"].includes(e)) return "🗜";
+  if (["mp4","mov","prproj","aep"].includes(e)) return "🎬";
+  return "📎";
+}
+function renderAtts() {
+  const hint = $("attHint");
+  if (!syncCfg.token) { hint.style.display = "block"; hint.className = "att-hint err"; hint.textContent = "未配置同步 Token，附件将无法上传——先点顶栏同步胶囊完成配置"; }
+  else { hint.style.display = "none"; }
+  const items = [
+    ...attExisting.map((a, i) => `
+      <div class="att-item">
+        <span class="ic">${attIcon(a.name)}</span>
+        <span class="n" title="${esc(a.name)}">${esc(a.name)}</span>
+        <span class="sz">${fmtSize(a.size || 0)}</span>
+        <span class="op">
+          <button class="dl" onclick="event.stopPropagation();dlAtt('${a.tid}',${i})" title="下载">下载</button>
+          <button onclick="event.stopPropagation();rmAtt('${a.tid}',${i})" title="删除">✕</button>
+        </span>
+      </div>`),
+    ...attQueued.map(q => `
+      <div class="att-item pending">
+        <span class="ic">${attIcon(q.file.name)}</span>
+        <span class="n" title="${esc(q.file.name)}">${esc(q.file.name)}</span>
+        <span class="sz">${fmtSize(q.file.size)}</span>
+        <span class="op"><button onclick="event.stopPropagation();attUnqueue('${q.uid}')" title="移除">✕</button></span>
+      </div>`)
+  ];
+  $("attList").innerHTML = items.join("");
+}
+function attPick(files) {
+  if (!files || !files.length) return;
+  for (const f of files) {
+    if (f.size > ATT_MAX) { toast("「" + f.name + "」超过 50MB，暂不支持，请先压缩或传网盘后贴链接"); continue; }
+    attQueued.push({ uid: "a" + Date.now() + Math.random().toString(36).slice(2, 5), file: f });
+  }
+  renderAtts();
+}
+function attUnqueue(uid) { attQueued = attQueued.filter(x => x.uid !== uid); renderAtts(); }
+function abToB64(buf) {
+  const bytes = new Uint8Array(buf); let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+async function attUploadAll(t) {
+  if (!syncCfg.token) { attQueued = []; return; }
+  if (!t.attachments) t.attachments = [];
+  for (const q of attQueued) {
+    const safe = q.file.name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80);
+    const path = `files/${t.id}/${Date.now()}_${safe}`;
+    const buf = await q.file.arrayBuffer();
+    const r = await ghFetch(`${GH_API}/repos/${syncCfg.repo}/contents/${escPath(path)}`, {
+      method: "PUT",
+      headers: Object.assign({ "Content-Type": "application/json" }, ghHeaders()),
+      body: JSON.stringify({ message: "attach: " + safe, content: abToB64(buf), branch: syncCfg.branch })
+    });
+    if (r.status === 404) throw new Error("仓库不存在，或 Token 没有该仓库权限");
+    const j = await r.json();
+    if (!j || !j.content) throw new Error("附件写入未确认");
+    t.attachments.push({ tid: t.id, path, name: q.file.name, size: q.file.size, sha: j.content.sha, at: Date.now() });
+  }
+  attQueued = [];
+  touch(t);
+}
+async function dlAtt(tid, i) {
+  try {
+    const t = tasks.find(x => x.id === tid);
+    const a = t && t.attachments && t.attachments[i];
+    if (!a) return;
+    toast("正在下载 " + a.name + " …");
+    const r = await ghFetch(`${GH_API}/repos/${syncCfg.repo}/contents/${escPath(a.path)}?ref=${encodeURIComponent(syncCfg.branch)}`, {
+      headers: { Authorization: "Bearer " + syncCfg.token, Accept: "application/vnd.github.raw+json" },
+      cache: "no-store"
+    });
+    if (r.status === 404) throw new Error("云端没有这个文件（可能被他人删除）");
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement("a");
+    el.href = url; el.download = a.name; document.body.appendChild(el); el.click(); el.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (e) { toast("下载失败：" + e.message); }
+}
+async function rmAtt(tid, i) {
+  const t = tasks.find(x => x.id === tid);
+  const a = t && t.attachments && t.attachments[i];
+  if (!a || !confirm("从云端删除附件「" + a.name + "」？")) return;
+  try {
+    await ghFetch(`${GH_API}/repos/${syncCfg.repo}/contents/${escPath(a.path)}`, {
+      method: "DELETE",
+      headers: Object.assign({ "Content-Type": "application/json" }, ghHeaders()),
+      body: JSON.stringify({ message: "rm attach: " + a.name, sha: a.sha, branch: syncCfg.branch })
+    });
+    t.attachments.splice(i, 1); touch(t); saveTasks(); renderAll(); renderAtts();
+    toast("附件已删除");
+  } catch (e) { toast("删除失败：" + e.message); }
+}
 function mergeDocs(remote) {
   const rTasks = (remote && Array.isArray(remote.tasks)) ? remote.tasks : [];
   const rDel = (remote && remote.del) || {};
@@ -1513,6 +1658,7 @@ function cardHTML(t) {
       <div class="card-foot">
         <span class="due ${ds}">${t.due ? (ds === "over" ? "⚠ " : "⏰ ") + t.due.slice(5) : ""}</span>
         ${t.link ? `<a class="plink" href="${esc(t.link)}" target="_blank" onclick="event.stopPropagation()">链接</a>` : ""}
+        ${t.attachments && t.attachments.length ? `<span class="plink" style="color:var(--muted);cursor:pointer" onclick="event.stopPropagation();openModal('${t.id}')">📎 ${t.attachments.length}</span>` : ""}
         <span class="spacer"></span>
         ${t.owner ? `<span class="av" title="${esc(t.owner)}">${esc(t.owner.slice(0, 1))}</span>` : ""}
         <span class="acts">
@@ -1595,6 +1741,9 @@ function openModal(id, col) {
   chipSel = t ? [...(t.platforms || [])] : [];
   renderChips();
   epDraft = t ? (t.eps || []).map(e => Object.assign({}, e)) : [];
+  attExisting = t ? (t.attachments || []).map(a => Object.assign({ tid: t.id }, a)) : [];
+  attQueued = [];
+  renderAtts();
   updEpsVis();
   $("mask").classList.add("on");
   $("mask").dataset.col = (!t && col) ? col : "";
@@ -1602,6 +1751,15 @@ function openModal(id, col) {
 }
 function closeModal() { $("mask").classList.remove("on"); }
 $("mask").addEventListener("click", e => { if (e.target === e.currentTarget) closeModal(); });
+$("attDrop").addEventListener("click", () => $("attFile").click());
+$("attFile").addEventListener("change", e => { attPick(e.target.files); e.target.value = ""; });
+["dragenter", "dragover"].forEach(ev => $("attDrop").addEventListener(ev, e => { e.preventDefault(); $("attDrop").classList.add("drag"); }));
+["dragleave", "dragend"].forEach(ev => $("attDrop").addEventListener(ev, e => { e.preventDefault(); $("attDrop").classList.remove("drag"); }));
+$("attDrop").addEventListener("drop", e => {
+  e.preventDefault(); e.stopPropagation();
+  $("attDrop").classList.remove("drag");
+  attPick(e.dataTransfer.files);
+});
 $("setMask").addEventListener("click", e => { if (e.target === e.currentTarget) closeSettings(); });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { closeModal(); closeSettings(); closeUserMenu(); }
@@ -1637,12 +1795,25 @@ function saveTask() {
       eps: epDraft.map(e => Object.assign({}, e))
     };
   }
-  if (editingId) { const t = tasks.find(t => t.id === editingId); Object.assign(t, data); touch(t); toast("已保存"); }
+  let target;
+  if (editingId) { target = tasks.find(t => t.id === editingId); Object.assign(target, data); touch(target); toast("已保存"); }
   else {
-    tasks.push({ id: "t" + Date.now() + Math.random().toString(36).slice(2, 6), col: $("mask").dataset.col || "backlog", createdAt: today(), updatedAt: Date.now(), ...data });
+    target = { id: "t" + Date.now() + Math.random().toString(36).slice(2, 6), col: $("mask").dataset.col || "backlog", createdAt: today(), updatedAt: Date.now(), ...data };
+    tasks.push(target);
     toast("已创建");
   }
   saveTasks(); closeModal(); renderAll();
+  if (attQueued.length) {
+    const n = attQueued.length;
+    toast("正在上传 " + n + " 个附件…");
+    attUploadAll(target).then(() => {
+      saveTasks(); renderAll();
+      toast("附件上传完成，共 " + (target.attachments || []).length + " 个");
+    }).catch(e => {
+      saveTasks(); renderAll();
+      toast("附件上传失败：" + e.message);
+    });
+  }
 }
 
 /* ============ 设置 / 用户菜单 ============ */
