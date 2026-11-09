@@ -1887,29 +1887,27 @@ function importData(input) {
 }
 
 /* ============ 启动 ============ */
-function seedDemo() {
-  // 已开启同步时不再塞示例数据，避免新设备把删掉的示例任务「复活」
-  if (syncCfg.token) return;
-  if (tasks.length || localStorage.getItem(K_TASKS + "_seeded")) return;
-  tasks = [
-    { id: "d1", col: "plan", type: "content", title: "《重生之都市修仙》高能钩子切片", note: "前 3 秒反转，完播卡点设计，抖音违禁词自查", platforms: ["douyin", "drama"], prio: "P0", owner: "狼叔", due: addDays(today(), 2), link: "", createdAt: today() },
-    { id: "d2", col: "making", type: "content", title: "B站 剧解读长视频剪辑", note: "10 分钟硬核解析，三连引导，评论区置顶神评", platforms: ["bilibili"], prio: "P1", owner: "狼叔", due: addDays(today(), 5), link: "", createdAt: today() },
-    { id: "d3", col: "ready", type: "content", title: "小红书种草图文 · 女频向", note: "封面标题 A/B 测试，SEO 关键词埋点", platforms: ["xhs"], prio: "P2", owner: "狼叔", due: "", link: "", createdAt: today() },
-    { id: "d4", col: "published", type: "content", title: "YouTube Shorts 英文字幕版", note: "挂落地页链接，监控 CTR 与完播", platforms: ["yt", "ig"], prio: "P1", owner: "狼叔", due: "", link: "", createdAt: today() },
-    { id: "d5", col: "backlog", type: "workflow", title: "品牌宣传短视频代制作", client: "示例客户 · XX传媒", material: "品牌 Logo、产品图 3 张、slogan 文案、授权书", requirement: "竖版 9:16、30s 内、突出核心卖点、含中英字幕、3 天出初稿", prio: "P1", owner: "狼叔", due: addDays(today(), 7), link: "", platforms: [], createdAt: today() }
-  ];
+/* 清掉旧版本内置的示例任务（id d1–d5），并写墓碑防止被其他设备的旧数据同步回来 */
+const DEMO_IDS = ["d1", "d2", "d3", "d4", "d5"];
+function purgeDemo() {
+  const hit = tasks.filter(t => t && DEMO_IDS.includes(t.id));
+  if (!hit.length) return 0;
   const now = Date.now();
-  tasks.forEach(t => { t.updatedAt = now; });
+  tasks = tasks.filter(t => !(t && DEMO_IDS.includes(t.id)));
+  hit.forEach(t => { delMap[t.id] = now; });
+  wj(K_TASKS, tasks);
+  wj(K_DEL, delMap);
   localStorage.setItem(K_TASKS + "_seeded", "1");
-  saveTasks();
+  return hit.length;
 }
 
 function boot() {
   tasks = rj(K_TASKS, []);
   if (!Array.isArray(tasks)) tasks = [];
-  seedDemo();
+  const cleaned = purgeDemo();
   renderAll();
   renderSyncUI();
+  if (cleaned) toast("已清除 " + cleaned + " 条内置示例任务");
   if (syncCfg.token) syncNow(false);
 }
 
